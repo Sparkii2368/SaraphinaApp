@@ -14,8 +14,9 @@ from bs4 import BeautifulSoup
 # ------------------ Config ------------------
 st.set_page_config(page_title="Saraphina — Living Knowledge", page_icon="✨", layout="wide")
 
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", None)
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", None)
+SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+SUPABASE_API_KEY = st.secrets.get("SUPABASE_API_KEY")
+SUPABASE_TABLE = st.secrets.get("SUPABASE_TABLE", "memory_docs")
 DEFAULT_VIBE = st.secrets.get("BRAND_VIBE", "Neutral")
 DEFAULT_DEPTH = int(st.secrets.get("RECALL_DEPTH", 3))
 DEBUG_MODE = str(st.secrets.get("DEBUG_MODE", "False")).lower() == "true"
@@ -29,18 +30,18 @@ X = None
 
 # ------------------ Supabase ------------------
 def cloud_enabled():
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    return bool(SUPABASE_URL and SUPABASE_API_KEY)
 
 def db_headers():
     return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_API_KEY,
+        "Authorization": f"Bearer {SUPABASE_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
 def db_fetch_all():
-    url = f"{SUPABASE_URL}/rest/v1/memory_docs?select=*"
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}?select=*"
     r = requests.get(url, headers=db_headers(), timeout=30)
     r.raise_for_status()
     items = r.json()
@@ -48,7 +49,7 @@ def db_fetch_all():
     return items
 
 def db_upsert_many(docs: List[dict]):
-    url = f"{SUPABASE_URL}/rest/v1/memory_docs"
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     r = requests.post(
         url,
         headers={**db_headers(), "Prefer": "resolution=merge-duplicates"},
@@ -58,9 +59,8 @@ def db_upsert_many(docs: List[dict]):
     r.raise_for_status()
     return True
 
-# ------------------ Local fallback ------------------
+# ------------------ Local Fallback ------------------
 def local_save():
-    # Avoid ambiguous truth checks on arrays/sparse matrices
     if vectorizer is not None and retriever is not None and X is not None:
         dump(vectorizer, f"{PREFIX}_tfidf.joblib")
         dump(retriever, f"{PREFIX}_retriever.joblib")
@@ -202,37 +202,10 @@ with st.sidebar:
     st.caption(f"Cloud: {'ON' if cloud_enabled() else 'OFF'} • Debug: {'ON' if DEBUG_MODE else 'OFF'}")
     st.caption(f"Memory size: {len(memory_docs)} docs")
 
-# Ensure the brain is loaded once at startup
 if retriever is None or vectorizer is None or not memory_docs:
     load_brain(recall_depth)
 
 # ---- Teach ----
 st.subheader("Teach Saraphina")
 with st.form("teach_form"):
-    teach_label = st.text_input("Label", value="branding_canon")
-    teach_tags = st.text_input("Tags (comma-separated)", value="branding,voice")
-    teach_source = st.text_input("Source (optional)", value="manual")
-    teach_text_input = st.text_area("What do you want to teach?", height=180)
-    submitted = st.form_submit_button("Teach")
-    if submitted and teach_text_input.strip():
-        tags = [t.strip() for t in teach_tags.split(",") if t.strip()]
-        teach_text(teach_text_input, teach_label, tags, teach_source, recall_depth)
-        persist_target = "Supabase" if cloud_enabled() else "local memory"
-        st.success(f"Taught {teach_label}. Persisted to {persist_target}.")
-        if DEBUG_MODE:
-            st.caption(f"[DEBUG] Tags: {tags} • Source: {teach_source} • Chunks: {len(chunk_text(teach_text_input))}")
-
-st.divider()
-
-# ---- Ask ----
-st.subheader("Ask Saraphina")
-with st.form("ask_form"):
-    user_q = st.text_input("Your question")
-    ask_submitted = st.form_submit_button("Ask")
-    if ask_submitted and user_q.strip():
-        answer, hits = synthesize_answer(user_q, vibe, recall_depth)
-        st.write(answer)
-        with st.expander("Show retrieved memory (context)"):
-            for i, h in enumerate(hits, 1):
-                st.markdown(f"**{i}. {h.get('label','unknown')}** — similarity: {h.get('similarity', 0.0):.3f}")
-                st.write(h["text"])
+    teach_label = st.text_input("Label", value
