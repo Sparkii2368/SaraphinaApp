@@ -208,4 +208,18 @@ if retriever is None or vectorizer is None or not memory_docs:
 # ---- Teach ----
 st.subheader("Teach Saraphina")
 with st.form("teach_form"):
-    teach_label = st.text_input("Label", value
+    teach_label = st.text_input("Label", value="")  # ✅ closed parentheses, added a default
+    teach_text_input = st.text_area("Content", value="")
+    teach_tags = st.text_input("Tags (comma-separated)", value="")
+    teach_source = st.text_input("Source", value="manual")
+
+    submitted = st.form_submit_button("Teach")
+    if submitted:
+        if not teach_label.strip():
+            st.warning("Please enter a label.")
+        elif not teach_text_input.strip():
+            st.warning("Please enter some content to teach.")
+        else:
+            tags_list = [t.strip() for t in teach_tags.split(",") if t.strip()]
+            teach_text(teach_text_input, teach_label.strip(), tags_list, teach_source.strip(), recall_depth)
+            st.success(f"Taught: {teach_label}")
