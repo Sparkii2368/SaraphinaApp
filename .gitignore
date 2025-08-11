@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Streamlit secrets (do NOT commit)
+.streamlit/secrets.toml
+
+# Local vectorizer artifacts
+saraphina_tfidf.joblib
+saraphina_retriever.joblib
+saraphina_X.joblib
+saraphina_docs.json
+
+# OS/editor noise
+.DS_Store
+*.swp
