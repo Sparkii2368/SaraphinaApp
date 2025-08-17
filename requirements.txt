@@ -19,3 +19,5 @@ prometheus-client # Prometheus metrics endpoint
 
 # Robust HTTP retries
 urllib3
+
+dotenv
