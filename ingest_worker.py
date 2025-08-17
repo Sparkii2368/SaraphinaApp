@@ -12,7 +12,10 @@ from bs4 import BeautifulSoup
 from langdetect import detect, LangDetectException
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import yaml
+
+# Centralized policy gate + loader (from Step 2)
+from guardrails import policy_check
+from policy_loader import load_policy
 
 # Prometheus metrics
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
@@ -28,21 +31,7 @@ _t0 = time.perf_counter()
 def mark(msg: str):
     logging.info("%s | t=%.2fs", msg, time.perf_counter() - _t0)
 
-# ---------- policy ----------
-POLICY_PATH = os.getenv("POLICY_PATH", "policy.yaml")
-if os.path.exists(POLICY_PATH):
-    try:
-        with open(POLICY_PATH, "r", encoding="utf-8") as f:
-            _pol = yaml.safe_load(f) or {}
-    except Exception as e:
-        logging.warning("Failed to read policy.yaml: %s", e)
-        _pol = {}
-else:
-    _pol = {}
-
-ALLOWLIST = _pol.get("allowlist", [])
-DENYLIST = _pol.get("denylist", [])
-
+# ---------- policy helpers ----------
 def is_valid_url(u: str) -> bool:
     try:
         parts = urlparse(u)
@@ -51,17 +40,9 @@ def is_valid_url(u: str) -> bool:
         return False
 
 def host_allowed(u: str) -> tuple[bool, str]:
-    from fnmatch import fnmatch
     host = urlparse(u).hostname or ""
-    # deny first
-    for pat in DENYLIST:
-        if fnmatch(host, pat):
-            return False, "denylist"
-    for pat in ALLOWLIST:
-        if fnmatch(host, pat):
-            return True, "allowlist"
-    # default-deny
-    return False, "not_allowed"
+    ok, decision = policy_check(host, "read")
+    return ok, decision
 
 def normalize_links(base_url: str, links: list[str], max_links: int = 100) -> list[str]:
     out, seen = [], set()
@@ -72,13 +53,63 @@ def normalize_links(base_url: str, links: list[str], max_links: int = 100) -> li
             continue
         if not is_valid_url(abs_u):
             continue
-        ok, _ = host_allowed(abs_u)
+        ok, decision = host_allowed(abs_u)
         if not ok:
+            ingest_fail.labels(reason=f"policy:{decision}").inc()
+            logging.debug("Policy blocked URL: %s | decision=%s", abs_u, decision)
             continue
         if abs_u not in seen:
             seen.add(abs_u)
             out.append(abs_u)
     return out
+
+def _provenance_policy():
+    pol = load_policy()
+    req = pol.get("provenance_requirements", {}) or {}
+    return {
+        "required_fields": list(req.get("required_fields", [])),
+        "enforce_on": list(req.get("enforce_on", [])),  # e.g., ["allowlist"]
+        "block_if_missing": bool(req.get("block_if_missing", False)),
+    }
+
+def enforce_provenance(row: dict, decision: str, collector_id: str):
+    """
+    Populate and validate provenance per policy.
+    decision: policy decision string from policy_check (e.g., ALLOW_MATCH, DENY_..., OVERRIDE_...)
+    """
+    prov_pol = _provenance_policy()
+    required = prov_pol["required_fields"]
+    enforce_on = set(p.lower() for p in prov_pol["enforce_on"])
+    block_if_missing = prov_pol["block_if_missing"]
+
+    # Decide whether to enforce for this row
+    enforce = True
+    if enforce_on:
+        # Treat ALLOW and OVERRIDE as "allowlist" context for enforcement purposes
+        context = "allowlist" if decision.startswith("ALLOW") or decision.startswith("OVERRIDE") else "denylist"
+        enforce = context in enforce_on
+
+    # Ensure provenance object exists
+    row.setdefault("provenance", {})
+    prov = row["provenance"]
+
+    # Fill recommended fields so checks pass
+    prov.setdefault("source_url", row.get("url"))
+    prov.setdefault("ingestion_timestamp", row.get("timestamp"))
+    prov.setdefault("content_hash", row.get("content_hash"))
+    prov.setdefault("license", "unknown")  # domain-specific detectors can refine later
+    prov.setdefault("collector_id", collector_id)
+
+    if not enforce or not required:
+        return True, []
+
+    missing = [k for k in required if not prov.get(k)]
+    if missing:
+        if block_if_missing:
+            return False, missing
+        else:
+            logging.warning("Provenance missing (non-blocking): %s for id=%s", missing, row.get("id"))
+    return True, []
 
 # ---------- rate limiting ----------
 class DomainRateLimiter:
@@ -129,6 +160,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
 SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY", "").strip()
 TABLE = os.environ.get("SUPABASE_TABLE", "memory_docs")
 USER_AGENT = os.getenv("USER_AGENT", "SaraphinaBot/1.0 (+contact: your-email@example.com)")
+COLLECTOR_ID = os.getenv("COLLECTOR_ID", "ingest_worker")
 
 if not SUPABASE_URL or not SUPABASE_API_KEY:
     logging.error("Missing SUPABASE_URL or SUPABASE_API_KEY in environment.")
@@ -268,10 +300,10 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
         ingest_fail.labels(reason="invalid_url").inc()
         mark(f"Invalid URL format: {u}")
         return [], 0
-    ok, tag = host_allowed(u)
+    ok, decision = host_allowed(u)
     if not ok:
-        ingest_fail.labels(reason="policy_block").inc()
-        mark(f"Policy blocked: {u}")
+        ingest_fail.labels(reason=f"policy:{decision}").inc()
+        mark(f"Policy blocked: {u} | decision={decision}")
         return [], 0
 
     mark(f"Process start: {u}")
@@ -314,7 +346,8 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
         seen_chunk_hashes.add(chash)
 
         ck = checksum_for(u, ch)  # stable per-url chunk id
-        rows.append({
+
+        row = {
             "id": f"{label}::{ck[:12]}::{i:03d}",
             "label": label,
             "text": ch,
@@ -327,15 +360,24 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
             "lang": lang,
             "checksum": ck,            # url+chunk-based id hash (existing)
             "content_hash": chash,     # pure chunk-content hash (for cross-run dedupe)
-            "policy_tag": tag,         # allowlist/denylist decision from host_allowed(u)
+            "policy_tag": decision,    # policy decision code from host_allowed(u)
             "trust_score": 0.5,        # starter value; refine later
-            "provenance": {            # lineage for auditability
+            "provenance": {            # lineage for auditability (filled/refined below)
                 "source_url": u,
                 "fetched_at": ts,
                 "method": "http_get",
                 "robots_ok": True
             }
-        })
+        }
+
+        # Enforce provenance per policy v1.2 (adds required fields and validates)
+        ok_prov, missing = enforce_provenance(row, decision=decision, collector_id=COLLECTOR_ID)
+        if not ok_prov:
+            ingest_fail.labels(reason="provenance").inc()
+            logging.warning("Dropping row for provenance missing fields=%s | id=%s | url=%s", missing, row["id"], u)
+            continue
+
+        rows.append(row)
 
     mark(f"Chunked {u} -> {len(rows)} chunks lang={lang}")
     return rows, bytes_total
@@ -391,7 +433,7 @@ def main():
     if allow_domains:
         urls = [u for u in urls if (urlparse(u).netloc in allow_domains)]
 
-    # also apply policy allowlist/denylist
+    # also apply policy allowlist/denylist (centralized)
     urls = [u for u in urls if is_valid_url(u) and host_allowed(u)[0]]
 
     mark(f"Collected URLs | before={before} after_filter={len(urls)}")
@@ -466,13 +508,17 @@ if False:
         "lang": "en",
         "checksum": "abc123",
         "content_hash": hashlib.sha256(test_text.encode("utf-8")).hexdigest(),
-        "policy_tag": "allowlist",
+        "policy_tag": "ALLOW_MATCH",
         "trust_score": 0.5,
         "provenance": {
             "source_url": "https://example.com/hello",
             "fetched_at": ts,
             "method": "http_get",
-            "robots_ok": True
+            "robots_ok": True,
+            "ingestion_timestamp": ts,
+            "content_hash": hashlib.sha256(test_text.encode("utf-8")).hexdigest(),
+            "license": "unknown",
+            "collector_id": "ingest_worker"
         }
     }]
     upsert_many(test_row)

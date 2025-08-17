@@ -1,10 +1,65 @@
+policyversion: 1.2
+meta:
+  updated: 2025-08-17
+  last_reviewed: 2025-08-17
+  owner: "Jacques"
+  description: >
+    Saraphina system charter policy for domain access, risk management,
+    guardrail enforcement, and provenance standards.
+  schema_version: "2025.1"
+  provenance: true
+
 allowlist:
-  - "en.wikipedia.org"
-  - "simple.wikipedia.org"
-  - "*.gov.za"
-  - "docs.yoursuniquely.com"
+  - pattern: "en.wikipedia.org"
+    risk_tier: low
+    actions: [read]
+    tags: [reference, encyclopedia]
+  - pattern: "simple.wikipedia.org"
+    risk_tier: low
+    actions: [read]
+    tags: [reference, simplified]
+  - pattern: "*.gov.za"
+    risk_tier: medium
+    actions: [read]
+    tags: [government, legal]
+  - pattern: "docs.yoursuniquely.com"
+    risk_tier: high
+    actions: [read, write]
+    tags: [internal, sensitive]
+
 denylist:
-  - "*.pastebin.*"
-  - "localhost"
-  - "127.*"
-  - "0.0.0.0"
+  - pattern: "*.pastebin.*"
+    risk_tier: high
+    actions: [read, write]
+    decision_code: DENY_PUBLIC_PASTE
+  - pattern: "localhost"
+    risk_tier: critical
+    actions: [read, write, execute]
+    decision_code: DENY_LOCALHOST
+  - pattern: "127.*"
+    risk_tier: critical
+    actions: [read, write, execute]
+    decision_code: DENY_LOOPBACK
+  - pattern: "0.0.0.0"
+    risk_tier: critical
+    actions: [read, write, execute]
+    decision_code: DENY_WILDCARD_IP
+
+overrides:
+  - pattern: "*.gov.za"
+    allowed_by: ["Jacques"]
+    requires_justification: true
+    justification_example: "Official research project with signed approval."
+    log_override: true
+    decision_code: OVERRIDE_GOV_ZA
+
+provenance_requirements:
+  required_fields: [source_url, ingestion_timestamp, content_hash, license, collector_id]
+  enforce_on: [allowlist]
+  block_if_missing: true
+
+logging:
+  audit_decisions: true
+  log_level: info
+  log_format: json
+  include_decision_codes: true

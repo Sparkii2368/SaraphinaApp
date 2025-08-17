@@ -1,4 +1,3 @@
-# runner.py
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,6 +5,10 @@ import os, time, subprocess, sys, requests
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 from supabase import create_client
+
+# --- Policy imports (Step 2 modules) ---
+from guardrails import policy_check
+from policy_loader import load_policy, get_policy_version
 
 # --- CONFIG ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -52,15 +55,38 @@ def fetch_metrics() -> dict:
         print(f"[{utc_stamp()}] ⚠️ Metrics fetch failed: {e}")
     return metrics
 
+# --- POLICY SANITY ---
+def policy_sanity_check():
+    """Verify policy.yaml is present, parseable, and has required schema keys."""
+    try:
+        pol = load_policy(force_reload=True)
+        required_top_keys = {"allowlist", "denylist", "overrides", "logging"}
+        missing = required_top_keys - pol.keys()
+        if missing:
+            print(f"[{utc_stamp()}] ⚠️ Policy missing keys: {missing}")
+            return False
+        print(f"[{utc_stamp()}] 📜 Policy OK — version {get_policy_version()}")
+        return True
+    except Exception as e:
+        print(f"[{utc_stamp()}] ❌ Policy load failed: {e}")
+        return False
+
 # --- TASKS ---
 def run_ingest():
     start_time = datetime.now(timezone.utc)
-    print(f"[{utc_stamp()}] 🚀 Starting ingestion run…")
+    print(f"[{utc_stamp()}] 🚀 Starting ingestion run under policy v{get_policy_version()}")
+
+    # Optional pre-flight: verify seeds are policy compliant
     seeds_env = os.getenv("SEED_URLS", "")
     if seeds_env:
         for u in [s.strip() for s in seeds_env.split(",") if s.strip()]:
             if not is_valid_url(u):
                 print(f"[{utc_stamp()}] ⚠️ Skipping invalid seed URL: {u}")
+                continue
+            ok, decision = policy_check(urlparse(u).hostname or "", "read")
+            if not ok:
+                print(f"[{utc_stamp()}] ❌ Seed URL blocked by policy: {u} | decision={decision}")
+                return False
 
     try:
         result = subprocess.run(
@@ -85,9 +111,14 @@ def run_ingest():
         return True
 
 def health_check():
-    """Check rows in last lookback window + metrics sanity."""
+    """Check rows in last lookback window + metrics sanity + policy sanity."""
     print(f"[{utc_stamp()}] 🔍 Running health check…")
     ok = True
+
+    # Check policy validity first
+    if not policy_sanity_check():
+        ok = False
+
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=HEALTH_LOOKBACK_SECS)
