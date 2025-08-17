@@ -2,24 +2,38 @@ import os
 import json
 import re
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import streamlit as st
+from dotenv import load_dotenv
 from joblib import dump, load
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neighbors import NearestNeighbors
 from bs4 import BeautifulSoup
 
 # ------------------ Config ------------------
+load_dotenv()  # Load .env if present
+
 st.set_page_config(page_title="Saraphina — Living Knowledge", page_icon="✨", layout="wide")
 
-SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-SUPABASE_API_KEY = st.secrets.get("SUPABASE_API_KEY")
-SUPABASE_TABLE = st.secrets.get("SUPABASE_TABLE", "memory_docs")
-DEFAULT_VIBE = st.secrets.get("BRAND_VIBE", "Neutral")
-DEFAULT_DEPTH = int(st.secrets.get("RECALL_DEPTH", 3))
-DEBUG_MODE = str(st.secrets.get("DEBUG_MODE", "False")).lower() == "true"
+def cfg(name: str, default=None):
+    """Resolve config from env first, then st.secrets, else default."""
+    val = os.getenv(name)
+    if val is None:
+        try:
+            val = st.secrets.get(name, None)
+        except Exception:
+            val = None
+    return val if val is not None else default
+
+SUPABASE_URL = cfg("SUPABASE_URL") or cfg("SUPABASE_PROJECT_URL")
+SUPABASE_API_KEY = cfg("SUPABASE_API_KEY") or cfg("SUPABASE_KEY")
+SUPABASE_TABLE = cfg("SUPABASE_TABLE", "memory_docs")
+DEFAULT_VIBE = cfg("BRAND_VIBE", "Neutral")
+DEFAULT_DEPTH = int(cfg("RECALL_DEPTH", 3))
+DEBUG_MODE = str(cfg("DEBUG_MODE", "False")).lower() == "true"
 PREFIX = "saraphina"
 
 # ------------------ State ------------------
@@ -84,11 +98,28 @@ def local_load():
         X = None
         return False
 
+# ------------------ Helpers ------------------
+def safe_text(s) -> str:
+    try:
+        return (s or "").strip()
+    except Exception:
+        return ""
+
+def parse_iso_ts(s: Optional[str]) -> Optional[datetime]:
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.fromisoformat(s.strip().replace("Z", ""))
+    except Exception:
+        return None
+
 # ------------------ Core ML ------------------
 def chunk_text(text: str, max_chars: int = 800, overlap: int = 150) -> List[str]:
-    sentences = re.split(r'(?<=[\.\!\?])\s+', text.strip())
+    sentences = re.split(r'(?<=[\.\!\?])\s+', (text or "").strip())
     chunks, cur = [], ""
     for s in sentences:
+        if not s:
+            continue
         if len(cur) + len(s) + 1 <= max_chars:
             cur = (cur + " " + s).strip()
         else:
@@ -97,11 +128,17 @@ def chunk_text(text: str, max_chars: int = 800, overlap: int = 150) -> List[str]
             cur = (cur[-overlap:] + " " + s).strip() if overlap > 0 and cur else s
     if cur:
         chunks.append(cur)
-    return chunks
+    return [c for c in chunks if c.strip()]
 
 def retrain_corpus(recall_depth: int):
     global vectorizer, retriever, X
-    texts = [d["text"] for d in memory_docs] or [""]
+    texts = [safe_text(d.get("text")) for d in memory_docs]
+    texts = [t for t in texts if t]
+    if not texts:
+        vectorizer = None
+        retriever = None
+        X = None
+        return
     vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=8000)
     X = vectorizer.fit_transform(texts)
     retriever = NearestNeighbors(n_neighbors=max(1, recall_depth), metric="cosine")
@@ -155,12 +192,10 @@ def teach_text(text: str, label: str, tags: Optional[List[str]], source: str, re
         }
         memory_docs.append(d)
         new_docs.append(d)
-
     if cloud_enabled():
         db_upsert_many(new_docs)
     else:
         local_save()
-
     retrain_corpus(recall_depth)
 
 def fetch_url_text(url: str) -> str:
@@ -193,33 +228,17 @@ st.title("Saraphina — Living Knowledge")
 
 with st.sidebar:
     st.header("Settings")
-    vibe = st.selectbox("Brand vibe", ["Neutral", "Warm", "Bold"], index=["Neutral", "Warm", "Bold"].index(DEFAULT_VIBE))
+    vibe = st.selectbox(
+        "Brand vibe",
+        ["Neutral", "Warm", "Bold"],
+        index=["Neutral", "Warm", "Bold"].index(DEFAULT_VIBE)
+    )
     recall_depth = st.slider("Recall depth (k)", 1, 8, value=DEFAULT_DEPTH)
     if st.button("Reload brain"):
         load_brain(recall_depth)
         st.success("Brain reloaded.")
     st.markdown("---")
     st.caption(f"Cloud: {'ON' if cloud_enabled() else 'OFF'} • Debug: {'ON' if DEBUG_MODE else 'OFF'}")
+    host = urlparse(SUPABASE_URL or "").netloc or "unknown"
+    st.caption(f"Supabase: {host} • Table: {SUPABASE_TABLE}")
     st.caption(f"Memory size: {len(memory_docs)} docs")
-
-if retriever is None or vectorizer is None or not memory_docs:
-    load_brain(recall_depth)
-
-# ---- Teach ----
-st.subheader("Teach Saraphina")
-with st.form("teach_form"):
-    teach_label = st.text_input("Label", value="")  # ✅ closed parentheses, added a default
-    teach_text_input = st.text_area("Content", value="")
-    teach_tags = st.text_input("Tags (comma-separated)", value="")
-    teach_source = st.text_input("Source", value="manual")
-
-    submitted = st.form_submit_button("Teach")
-    if submitted:
-        if not teach_label.strip():
-            st.warning("Please enter a label.")
-        elif not teach_text_input.strip():
-            st.warning("Please enter some content to teach.")
-        else:
-            tags_list = [t.strip() for t in teach_tags.split(",") if t.strip()]
-            teach_text(teach_text_input, teach_label.strip(), tags_list, teach_source.strip(), recall_depth)
-            st.success(f"Taught: {teach_label}")

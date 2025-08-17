@@ -1,5 +1,21 @@
+# Core app/UI
 streamlit
+
+# ML / NLP utilities
 scikit-learn
 joblib
+langdetect        # for language detection of page text
+
+# HTTP and parsing
 requests
 beautifulsoup4
+feedparser        # for RSS/Atom feeds
+
+# Config and policy
+PyYAML            # load policy.yaml
+
+# Metrics/observability
+prometheus-client # Prometheus metrics endpoint
+
+# Robust HTTP retries
+urllib3

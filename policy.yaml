@@ -1,0 +1,10 @@
+allowlist:
+  - "en.wikipedia.org"
+  - "simple.wikipedia.org"
+  - "*.gov.za"
+  - "docs.yoursuniquely.com"
+denylist:
+  - "*.pastebin.*"
+  - "localhost"
+  - "127.*"
+  - "0.0.0.0"
