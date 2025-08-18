@@ -15,7 +15,9 @@ from urllib3.util.retry import Retry
 
 # Centralized policy gate + loader (from Step 2)
 from guardrails import policy_check
-from policy_loader import load_policy
+from policy_loader import load_policy, get_policy_version  # added get_policy_version
+from memory_engine import log_policy_decision              # ✅ NEW import
+
 
 # Prometheus metrics
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
@@ -300,10 +302,20 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
         ingest_fail.labels(reason="invalid_url").inc()
         mark(f"Invalid URL format: {u}")
         return [], 0
+
     ok, decision = host_allowed(u)
     if not ok:
         ingest_fail.labels(reason=f"policy:{decision}").inc()
         mark(f"Policy blocked: {u} | decision={decision}")
+        # ✅ NEW logging hook for deny
+        log_policy_decision(
+            actor="ingest_worker",
+            target=u,
+            action="ingest",
+            decision=decision,
+            reason="Host denied by policy gate",
+            meta={"policy_version": get_policy_version()}
+        )
         return [], 0
 
     mark(f"Process start: {u}")
@@ -341,11 +353,10 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
     for i, ch in enumerate(chunks):
         chash = content_hash(ch)
         if chash in seen_chunk_hashes:
-            # skip duplicate chunk content seen earlier in this run
             continue
         seen_chunk_hashes.add(chash)
 
-        ck = checksum_for(u, ch)  # stable per-url chunk id
+        ck = checksum_for(u, ch)
 
         row = {
             "id": f"{label}::{ck[:12]}::{i:03d}",
@@ -358,11 +369,11 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
             "url": u,
             "title": title,
             "lang": lang,
-            "checksum": ck,            # url+chunk-based id hash (existing)
-            "content_hash": chash,     # pure chunk-content hash (for cross-run dedupe)
-            "policy_tag": decision,    # policy decision code from host_allowed(u)
-            "trust_score": 0.5,        # starter value; refine later
-            "provenance": {            # lineage for auditability (filled/refined below)
+            "checksum": ck,
+            "content_hash": chash,
+            "policy_tag": decision,
+            "trust_score": 0.5,
+            "provenance": {
                 "source_url": u,
                 "fetched_at": ts,
                 "method": "http_get",
@@ -370,14 +381,36 @@ def process_url(u: str, seen_chunk_hashes: set[str]) -> tuple[list[dict], int]:
             }
         }
 
-        # Enforce provenance per policy v1.2 (adds required fields and validates)
+        # Enforce provenance per policy v1.2
         ok_prov, missing = enforce_provenance(row, decision=decision, collector_id=COLLECTOR_ID)
+
+        # ✅ NEW: log provenance check result
+        log_policy_decision(
+            actor="ingest_worker",
+            target=row.get("url") or "unknown",
+            action="ingest",
+            decision=decision if ok_prov else f"DENY_MISSING_{'_'.join(missing).upper()}",
+            reason="Provenance validation",
+            meta={
+                "doc_id": row.get("id"),
+                "policy_version": get_policy_version(),
+                "missing_fields": missing
+            }
+        )
+
         if not ok_prov:
             ingest_fail.labels(reason="provenance").inc()
-            logging.warning("Dropping row for provenance missing fields=%s | id=%s | url=%s", missing, row["id"], u)
+            logging.warning(
+                "Dropping row for provenance missing fields=%s | id=%s | url=%s",
+                missing, row["id"], u
+            )
             continue
 
         rows.append(row)
+
+    mark(f"Chunked {u} -> {len(rows)} chunks lang={lang}")
+    return rows, bytes_total
+
 
     mark(f"Chunked {u} -> {len(rows)} chunks lang={lang}")
     return rows, bytes_total

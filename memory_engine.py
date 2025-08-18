@@ -189,3 +189,61 @@ if __name__ == "__main__":
     results = engine.fetch_memories(search="test", limit=5)
     for r in results:
         print(r["timestamp"], r["policy_tag"], r["trust_score"], r["provenance"])
+# --- Policy events (append-only JSONL with in-memory cache) ---
+import os, json, threading, time
+from collections import deque
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
+
+_POLICY_EVENT_LOG = os.getenv("POLICY_EVENT_LOG", "policy_events.jsonl")
+_POLICY_EVENT_MAX = int(os.getenv("POLICY_EVENT_MAX", "5000"))
+_policy_event_lock = threading.Lock()
+_policy_event_buf: deque = deque(maxlen=min(_POLICY_EVENT_MAX, 10000))
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def log_policy_decision(*, actor: str, target: str, action: str, decision: str,
+                        reason: Optional[str] = None, meta: Optional[Dict[str, Any]] = None):
+    evt = {
+        "ts": _utc_iso(),
+        "type": "policy_decision",
+        "actor": actor,            # e.g., "runner" or "ingest_worker"
+        "target": target,          # hostname or URL
+        "action": action,          # "read", "write", "execute"
+        "decision": decision,      # ALLOW_MATCH, DENY_*, OVERRIDE_*
+        "reason": reason or "",
+        "meta": meta or {},
+    }
+    line = json.dumps(evt, ensure_ascii=False)
+    with _policy_event_lock:
+        _policy_event_buf.append(evt)
+        try:
+            with open(_POLICY_EVENT_LOG, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            # Don't raise; logging must never crash the worker/runner
+            pass
+    return evt
+
+def get_recent_policy_events(limit: int = 200) -> List[Dict[str, Any]]:
+    # Fast path: return from in-memory buffer if it’s warm and sufficient
+    with _policy_event_lock:
+        if len(_policy_event_buf) >= min(limit, _policy_event_buf.maxlen):
+            return list(_policy_event_buf)[-limit:]
+    # Slow path: read tail from file if present
+    events: List[Dict[str, Any]] = []
+    try:
+        with open(_POLICY_EVENT_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                    events.append(evt)
+                except Exception:
+                    continue
+        return events[-limit:]
+    except FileNotFoundError:
+        return list(_policy_event_buf)[-limit:]

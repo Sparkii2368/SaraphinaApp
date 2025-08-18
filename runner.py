@@ -10,6 +10,9 @@ from supabase import create_client
 from guardrails import policy_check
 from policy_loader import load_policy, get_policy_version
 
+# --- Policy event logging ---
+from memory_engine import log_policy_decision   # ✅ NEW
+
 # --- CONFIG ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
@@ -76,14 +79,26 @@ def run_ingest():
     start_time = datetime.now(timezone.utc)
     print(f"[{utc_stamp()}] 🚀 Starting ingestion run under policy v{get_policy_version()}")
 
-    # Optional pre-flight: verify seeds are policy compliant
     seeds_env = os.getenv("SEED_URLS", "")
     if seeds_env:
         for u in [s.strip() for s in seeds_env.split(",") if s.strip()]:
             if not is_valid_url(u):
                 print(f"[{utc_stamp()}] ⚠️ Skipping invalid seed URL: {u}")
                 continue
-            ok, decision = policy_check(urlparse(u).hostname or "", "read")
+
+            hostname = urlparse(u).hostname or ""
+            ok, decision = policy_check(hostname, "read")
+
+            # ✅ NEW: Log every seed policy check
+            log_policy_decision(
+                actor="runner",
+                target=hostname,
+                action="read",
+                decision=decision,
+                reason="Seed URL policy check",
+                meta={"seed_url": u, "policy_version": get_policy_version()}
+            )
+
             if not ok:
                 print(f"[{utc_stamp()}] ❌ Seed URL blocked by policy: {u} | decision={decision}")
                 return False
@@ -108,6 +123,16 @@ def run_ingest():
     else:
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         print(f"[{utc_stamp()}] ✅ Run complete in {duration:.2f} seconds.")
+
+        # ✅ Optional: Log run completion
+        log_policy_decision(
+            actor="runner",
+            target="all_seeds",
+            action="execute",
+            decision="COMPLETE",
+            reason="Ingestion cycle finished successfully",
+            meta={"duration_secs": duration, "policy_version": get_policy_version()}
+        )
         return True
 
 def health_check():
@@ -115,7 +140,6 @@ def health_check():
     print(f"[{utc_stamp()}] 🔍 Running health check…")
     ok = True
 
-    # Check policy validity first
     if not policy_sanity_check():
         ok = False
 
