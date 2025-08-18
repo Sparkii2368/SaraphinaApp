@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -11,23 +12,43 @@ from guardrails import policy_check
 from policy_loader import load_policy, get_policy_version
 
 # --- Policy event logging ---
-from memory_engine import log_policy_decision   # ✅ NEW
+from memory_engine import log_policy_decision   # ✅
+
+# --- Optional Prometheus Pushgateway ---
+try:
+    from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+    _PROM_PUSH_AVAILABLE = True
+except Exception:
+    _PROM_PUSH_AVAILABLE = False
 
 # --- CONFIG ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-WORKER_SCRIPT = os.getenv("WORKER_SCRIPT", "ingest_worker.py")
-HEALTH_TABLE = os.getenv("HEALTH_TABLE", "memory_docs")
-TIME_COLUMN = os.getenv("HEALTH_TIME_COLUMN", "timestamp")
+# ✅ Also fall back to SUPABASE_API_KEY if SUPABASE_KEY not set
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_KEY", "") or
+    os.getenv("SUPABASE_API_KEY", "")
+).strip()
 
-RUN_INTERVAL_SECS   = int(os.getenv("RUN_INTERVAL_SECS", 3600))  # 1h between runs
-HEALTH_LOOKBACK_SECS= int(os.getenv("HEALTH_LOOKBACK_SECS", 900)) # 15m window by default
-MIN_NEW_ROWS        = int(os.getenv("MIN_NEW_ROWS", 1))
-MAX_FAIL_RATIO      = float(os.getenv("MAX_FAIL_RATIO", 0.3))
-FAILURE_EXIT_AFTER  = int(os.getenv("FAILURE_EXIT_AFTER", 2))
-METRICS_URL         = os.getenv("METRICS_URL", "http://localhost:9110/metrics")
-REQUIRE_HEARTBEAT   = os.getenv("REQUIRE_HEARTBEAT", "true").lower() in ("1","true","yes")
-TIMEOUT             = float(os.getenv("RUNNER_HTTP_TIMEOUT", "20"))
+# ✅ DEBUG: show if vars are present (remove once confirmed)
+print(f"→ SUPABASE_URL={'set' if SUPABASE_URL else 'MISSING'}, "
+      f"SUPABASE_KEY={'set' if SUPABASE_KEY else 'MISSING'}")
+
+WORKER_SCRIPT        = os.getenv("WORKER_SCRIPT", "ingest_worker.py")
+HEALTH_TABLE         = os.getenv("HEALTH_TABLE", "memory_docs")
+TIME_COLUMN          = os.getenv("HEALTH_TIME_COLUMN", "timestamp")
+
+RUN_INTERVAL_SECS    = int(os.getenv("RUN_INTERVAL_SECS", 3600))   # 1h between runs
+HEALTH_LOOKBACK_SECS = int(os.getenv("HEALTH_LOOKBACK_SECS", 900)) # 15m window by default
+MIN_NEW_ROWS         = int(os.getenv("MIN_NEW_ROWS", 1))
+MAX_FAIL_RATIO       = float(os.getenv("MAX_FAIL_RATIO", 0.3))
+FAILURE_EXIT_AFTER   = int(os.getenv("FAILURE_EXIT_AFTER", 2))
+METRICS_URL          = os.getenv("METRICS_URL", "http://localhost:9110/metrics")
+REQUIRE_HEARTBEAT    = os.getenv("REQUIRE_HEARTBEAT", "true").lower() in ("1","true","yes")
+TIMEOUT              = float(os.getenv("RUNNER_HTTP_TIMEOUT", "20"))
+
+# Prometheus Pushgateway config (optional)
+PUSHGATEWAY_URL      = os.getenv("PUSHGATEWAY_URL", "").strip()
+RUNNER_JOB_NAME      = os.getenv("RUNNER_JOB_NAME", "runner_status")
 
 # --- UTILITIES ---
 def utc_stamp():
@@ -89,7 +110,7 @@ def run_ingest():
             hostname = urlparse(u).hostname or ""
             ok, decision = policy_check(hostname, "read")
 
-            # ✅ NEW: Log every seed policy check
+            # Log every seed policy check
             log_policy_decision(
                 actor="runner",
                 target=hostname,
@@ -124,7 +145,7 @@ def run_ingest():
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         print(f"[{utc_stamp()}] ✅ Run complete in {duration:.2f} seconds.")
 
-        # ✅ Optional: Log run completion
+        # Optional: Log run completion
         log_policy_decision(
             actor="runner",
             target="all_seeds",
@@ -169,10 +190,28 @@ def health_check():
             if fail_ratio > MAX_FAIL_RATIO:
                 print(f"[{utc_stamp()}] ⚠️ Fail ratio {fail_ratio:.2f} > {MAX_FAIL_RATIO:.2f}")
                 ok = False
+        else:
+            if REQUIRE_HEARTBEAT:
+                print(f"[{utc_stamp()}] ⚠️ No metrics available but heartbeat required")
+                ok = False
     except Exception as e:
         print(f"[{utc_stamp()}] ❌ Health check error: {e}")
         ok = False
     return ok
+
+# --- PROMETHEUS PUSH ACK ---
+def push_runner_health(status: bool):
+    """Push runner health metric to Prometheus Pushgateway (1=OK, 0=Fail)."""
+    if not PUSHGATEWAY_URL or not _PROM_PUSH_AVAILABLE:
+        return
+    try:
+        registry = CollectorRegistry()
+        g = Gauge("runner_healthy", "Runner health status (1=OK, 0=Fail)", registry=registry)
+        g.set(1.0 if status else 0.0)
+        push_to_gateway(PUSHGATEWAY_URL, job=RUNNER_JOB_NAME, registry=registry)
+        print(f"[{utc_stamp()}] 📤 ACK pushed: runner_healthy={int(status)} -> {PUSHGATEWAY_URL} (job={RUNNER_JOB_NAME})")
+    except Exception as e:
+        print(f"[{utc_stamp()}] ⚠️ Failed to push runner health: {e}")
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
@@ -180,6 +219,9 @@ if __name__ == "__main__":
     while True:
         run_ok = run_ingest()
         health_ok = health_check()
+
+        # Push ACK for current composite health
+        push_runner_health(run_ok and health_ok)
 
         if run_ok and health_ok:
             consecutive_failures = 0
