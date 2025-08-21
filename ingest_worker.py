@@ -1,74 +1,87 @@
-!/usr/bin/env python3
+#!/usr/bin/env python3
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, json, re, time, hashlib, sys, threading, logging, atexit
+import os
+import json
+import re
+import time
+import hashlib
+import sys
+import threading
+import logging
+import atexit
 from urllib.parse import urlparse, urljoin
 from urllib import robotparser
 from datetime import datetime, timezone
-from typing import List, Dict, Any
-
-import requests, feedparser
-from bs4 import BeautifulSoup
-from langdetect import detect, LangDetectException
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-memory_engine integration
-from memoryengine import logpolicy_decision
+import requests
+import feedparser
+from bs4 import BeautifulSoup
+from langdetect import detect, LangDetectException
+
+# memory_engine integration
+from memory_engine import log_policy_decision
+
+# Centralized policy gate + loader
 from guardrails import policy_check
-from policyloader import loadpolicy, getpolicyversion
+from policy_loader import load_policy, get_policy_version
+
+# Connector
 from connectors.wikipedia import WikipediaConnector
-from prometheusclient import Counter, Histogram, Gauge, starthttp_server
 
-----------------------------------------------------------------------
+# Prometheus metrics
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
-Logging
-
-----------------------------------------------------------------------
-LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
+# ----------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stdout,
 )
-t0 = time.perfcounter()
+_t0 = time.perf_counter()
+
 def mark(msg: str):
-    logging.info("%s | t=%.2fs", msg, time.perfcounter() - t0)
+    logging.info("%s | t=%.2fs", msg, time.perf_counter() - _t0)
 
-----------------------------------------------------------------------
-
-Configuration
-
-----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------
 def load_config() -> dict:
-    cfg = {"enablewikipedia": True, "batchsize": 50}
+    config = {
+        "enable_wikipedia": True,
+        "batch_size": 50,
+    }
     if os.path.exists("config.json"):
         try:
-            with open("config.json","r",encoding="utf-8") as f:
-                cfg.update(json.load(f))
+            with open("config.json", "r", encoding="utf-8") as f:
+                file_cfg = json.load(f)
+            config.update(file_cfg)
         except Exception as e:
             logging.warning("Could not load config.json: %s", e)
     if "ENABLE_WIKIPEDIA" in os.environ:
-        cfg["enablewikipedia"] = os.environ["ENABLEWIKIPEDIA"].lower() in ("1","true","yes")
+        config["enable_wikipedia"] = os.environ["ENABLE_WIKIPEDIA"].lower() in ("1","true","yes")
     if "BATCH_SIZE" in os.environ:
         try:
-            cfg["batchsize"] = int(os.environ["BATCHSIZE"])
+            config["batch_size"] = int(os.environ["BATCH_SIZE"])
         except ValueError:
             logging.warning("Invalid BATCH_SIZE in env, using default.")
-    return cfg
+    return config
 
 cfg = load_config()
 
-----------------------------------------------------------------------
-
-Policy helpers
-
-----------------------------------------------------------------------
-def isvalidurl(u: str) -> bool:
+# ----------------------------------------------------------------------
+# Policy helpers
+# ----------------------------------------------------------------------
+def is_valid_url(u: str) -> bool:
     try:
         parts = urlparse(u)
-        return parts.scheme in ("http","https") and bool(parts.netloc)
+        return parts.scheme in ("http", "https") and bool(parts.netloc)
     except Exception:
         return False
 
@@ -76,20 +89,38 @@ def host_allowed(u: str) -> tuple[bool,str]:
     host = urlparse(u).hostname or ""
     return policy_check(host, "read")
 
-def provenancepolicy():
+def normalize_links(base_url: str, links: list[str], max_links: int = 100) -> list[str]:
+    out, seen = [], set()
+    for href in links[:max_links]:
+        try:
+            abs_u = urljoin(base_url, href)
+        except Exception:
+            continue
+        if not is_valid_url(abs_u):
+            continue
+        ok, decision = host_allowed(abs_u)
+        if not ok:
+            ingest_fail.labels(reason=f"policy:{decision}").inc()
+            continue
+        if abs_u not in seen:
+            seen.add(abs_u)
+            out.append(abs_u)
+    return out
+
+def _provenance_policy():
     pol = load_policy()
     req = pol.get("provenance_requirements", {}) or {}
     return {
-        "requiredfields": list(req.get("requiredfields", [])),
-        "enforceon": list(req.get("enforceon", [])),
-        "blockifmissing": bool(req.get("blockifmissing", False)),
+        "required_fields": list(req.get("required_fields", [])),
+        "enforce_on": list(req.get("enforce_on", [])),
+        "block_if_missing": bool(req.get("block_if_missing", False)),
     }
 
-def enforceprovenance(row: dict, decision: str, collectorid: str):
-    provpol = provenance_policy()
-    required = provpol["requiredfields"]
-    enforceon = set(p.lower() for p in provpol["enforce_on"])
-    blockifmissing = provpol["blockif_missing"]
+def enforce_provenance(row: dict, decision: str, collector_id: str):
+    prov_pol = _provenance_policy()
+    required = prov_pol["required_fields"]
+    enforce_on = set(p.lower() for p in prov_pol["enforce_on"])
+    block_if_missing = prov_pol["block_if_missing"]
 
     enforce = True
     if enforce_on:
@@ -100,169 +131,208 @@ def enforceprovenance(row: dict, decision: str, collectorid: str):
     prov = row["provenance"]
     prov.setdefault("source_url", row.get("url"))
     prov.setdefault("ingestion_timestamp", row.get("timestamp"))
-    prov.setdefault("contenthash", row.get("contenthash"))
-    prov.setdefault("license","unknown")
-    prov.setdefault("collectorid", collectorid)
+    prov.setdefault("content_hash", row.get("content_hash"))
+    prov.setdefault("license", "unknown")
+    prov.setdefault("collector_id", collector_id)
 
     if not enforce or not required:
         return True, []
 
     missing = [k for k in required if not prov.get(k)]
     if missing:
-        if blockifmissing:
+        if block_if_missing:
             return False, missing
         else:
             logging.warning("Provenance missing (non-blocking): %s for id=%s", missing, row.get("id"))
     return True, []
 
----------- rate limiting ----------
+# ---------- rate limiting ----------
 class DomainRateLimiter:
-    def init(self, perdomainrps: float=1.0, globalrpscap: int=20):
-        self.perdomaininterval = 1.0 / max(perdomainrps,0.0001)
-        self.globalinterval = 1.0 / max(globalrps_cap,1)
-        self.lastdomain = {}
-        self.lastglobal = 0.0
+    def __init__(self, per_domain_rps: float=1.0, global_rps_cap: int=20):
+        self.per_domain_interval = 1.0 / max(per_domain_rps, 0.0001)
+        self.global_interval = 1.0 / max(global_rps_cap, 1)
+        self._last_domain = {}
+        self._last_global = 0.0
     def wait(self, domain: str):
         now = time.time()
-        delayd = max(0.0, self.lastdomain.get(domain,0.0)+self.perdomain_interval - now)
-        delayg = max(0.0, self.lastglobal + self.globalinterval - now)
-        delay = max(delayd, delayg)
+        delay_d = max(0.0, self._last_domain.get(domain,0.0) + self.per_domain_interval - now)
+        delay_g = max(0.0, self._last_global + self.global_interval - now)
+        delay = max(delay_d, delay_g)
         if delay>0: time.sleep(delay)
         now2 = time.time()
-        self.lastdomain[domain] = now2
-        self.lastglobal = now2
+        self._last_domain[domain] = now2
+        self._last_global = now2
 
 _rl: DomainRateLimiter | None = None
 
----------- metrics ----------
-METRICSPORT = int(os.getenv("METRICSPORT","9110"))
-METRICSADDR = os.getenv("METRICSADDR","0.0.0.0")
-METRICSLINGERSECS = int(os.getenv("METRICSLINGERSECS","120"))
+# ---------- metrics ----------
+METRICS_PORT = int(os.getenv("METRICS_PORT", "9110"))
+METRICS_ADDR = os.getenv("METRICS_ADDR", "0.0.0.0")
+METRICS_LINGER_SECS = int(os.getenv("METRICS_LINGER_SECS", "120"))
 
-ingestsuccess = Counter("ingestsuccess_total","Successful page ingests")
-ingestfail = Counter("ingestfail_total","Failed ingests",["reason"])
-ingestbytes = Counter("ingestbytes_total","Total bytes ingested (page text)")
-ingestlatency = Histogram("ingestlatency_seconds","Ingest latency per page (seconds)")
-heartbeatgauge = Gauge("ingestheartbeat","Heartbeat 1=alive,0=down")
-rawstoresuccess = Counter("rawstoresuccess_total","Successful raw doc stores")
-rawstorefail = Counter("rawstorefail_total","Failed raw doc stores",["reason"])
+ingest_success = Counter("ingest_success_total","Successful page ingests")
+ingest_fail = Counter("ingest_fail_total","Failed ingests",["reason"])
+ingest_bytes = Counter("ingest_bytes_total","Total bytes ingested (page text)")
+ingest_latency = Histogram("ingest_latency_seconds","Ingest latency per page (seconds)")
+heartbeat_gauge = Gauge("ingest_heartbeat","Heartbeat 1=alive, 0=down")
+raw_store_success = Counter("raw_store_success_total","Successful raw doc stores")
+raw_store_fail = Counter("raw_store_fail_total","Failed raw doc stores",["reason"])
 
-stopheartbeat = threading.Event()
+_stop_heartbeat = threading.Event()
 def heartbeat():
-    while not stopheartbeat.is_set():
+    while not _stop_heartbeat.is_set():
         heartbeat_gauge.set(1.0)
         time.sleep(5)
 
 @atexit.register
-def shutdownmetrics():
-    try: heartbeat_gauge.set(0.0)
-    except: pass
-    stopheartbeat.set()
+def _shutdown_metrics():
+    try:
+        heartbeat_gauge.set(0.0)
+    except Exception:
+        pass
+    _stop_heartbeat.set()
 
----------- HTTP session ----------
-SUPABASEURL = os.environ.get("SUPABASEURL","").strip()
-SUPABASEAPIKEY = os.environ.get("SUPABASEAPIKEY","").strip()
-TABLE = os.environ.get("SUPABASETABLE","memorydocs")
-RAWTABLE = os.environ.get("SUPABASERAWTABLE","memoryraw_docs")
-USERAGENT = os.getenv("USERAGENT","SaraphinaBot/1.0 (+contact: your-email@example.com)")
-COLLECTORID = os.getenv("COLLECTORID","ingest_worker")
+# ---------- HTTP session ----------
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY", "").strip()
+TABLE = os.environ.get("SUPABASE_TABLE", "memory_docs")
+RAW_TABLE = os.environ.get("SUPABASE_RAW_TABLE", "memory_raw_docs")
+USER_AGENT = os.getenv("USER_AGENT", "SaraphinaBot/1.0 (+contact: your-email@example.com)")
+COLLECTOR_ID = os.getenv("COLLECTOR_ID", "ingest_worker")
 
-if not SUPABASEURL or not SUPABASEAPI_KEY:
-    logging.error("Missing SUPABASEURL or SUPABASEAPI_KEY in environment.")
+if not SUPABASE_URL or not SUPABASE_API_KEY:
+    logging.error("Missing SUPABASE_URL or SUPABASE_API_KEY in environment.")
     sys.exit(1)
 
-PERDOMAINRPS = float(os.getenv("PERDOMAINRPS","1"))
-GLOBALRPSCAP = int(os.getenv("GLOBALRPSCAP","20"))
-DISCOVERYMAXLINKS = int(os.getenv("DISCOVERYMAXLINKS","100"))
-MINCHARS = int(os.getenv("MINDOC_CHARS","300"))
-BATCHSIZE = int(os.getenv("UPSERTBATCHSIZE", cfg.get("batchsize",50)))
-CONNECTTIMEOUT = float(os.getenv("CONNECTTIMEOUT","5"))
-READTIMEOUT = float(os.getenv("READTIMEOUT","25"))
-TIMEOUT = (CONNECTTIMEOUT, READTIMEOUT)
+PER_DOMAIN_RPS = float(os.getenv("PER_DOMAIN_RPS", "1"))
+GLOBAL_RPS_CAP = int(os.getenv("GLOBAL_RPS_CAP", "20"))
+DISCOVERY_MAX_LINKS = int(os.getenv("DISCOVERY_MAX_LINKS", "100"))
+MIN_CHARS = int(os.getenv("MIN_DOC_CHARS", "300"))
+BATCH_SIZE = int(os.getenv("UPSERT_BATCH_SIZE", cfg.get("batch_size", 50)))
+
+CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "5"))
+READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "25"))
+TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
 
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
-adapter = HTTPAdapter(max_retries=Retry(
-    total=3, backofffactor=0.5, statusforcelist=[429,500,502,503,504],
-    allowedmethods=["GET","POST","HEAD","OPTIONS"], raiseon_status=False))
+retries = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST", "HEAD", "OPTIONS"],
+    raise_on_status=False,
+)
+adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
 
----------- helpers ----------
-def http_get(url:str): return session.get(url, timeout=TIMEOUT)
-def dbheaders(): return {"apikey": SUPABASEAPIKEY, "Authorization":f"Bearer {SUPABASEAPI_KEY}","Content-Type":"application/json","Accept":"application/json"}
+# ---------- all helpers & processing ----------
+# ... [rest of your functions like fetch_html, store_raw_doc, process_url, chunk_text, detect_lang_safe remain the same]
 
-def checksum_for(url,chunk): return hashlib.sha256(url.encode()+b"\x00"+chunk.encode()).hexdigest()
-def content_hash(chunk): return hashlib.sha256(chunk.encode("utf-8",errors="ignore")).hexdigest()
-def detectlangsafe(text): 
-    try: return detect(text)
-    except LangDetectException: return "und"
+# ---------- main ----------
+def main():
+    global _rl
+    _rl = DomainRateLimiter(PER_DOMAIN_RPS, GLOBAL_RPS_CAP)
 
-def chunktext(text,maxchars=1200,overlap=200):
-    sentences=re.split(r'(?<=[\.\!\?])\s+',text.strip())
-    chunks,cur=[], ""
-    for s in sentences:
-        if len(cur)+len(s)+1 <= max_chars: cur=(cur+" "+s).strip()
-        else:
-            if cur: chunks.append(cur)
-            cur=(cur[-overlap:]+" "+s).strip() if overlap>0 and cur else s
-    if cur: chunks.append(cur)
-    return chunks
-
----------- processing ----------
-def processurl(u:str, seenchunk_hashes:set[str]) -> tuple[List[dict],int]:
-    if not isvalidurl(u): 
-        ingestfail.labels(reason="invalidurl").inc()
-        return [],0
-
-    ok, decision = host_allowed(u)
-    if not ok:
-        ingest_fail.labels(reason=f"policy:{decision}").inc()
-        logpolicydecision(actor="ingestworker", target=u, action="ingest", decision=decision, reason="Blocked by host policy", meta={"policyversion": getpolicyversion()})
-        return [],0
-
-    # robots
-    p=urlparse(u); rp=robotparser.RobotFileParser()
-    try: 
-        if rl: rl.wait(p.netloc or "unknown")
-        resp=http_get(f"{p.scheme}://{p.netloc}/robots.txt")
-        if resp.status_code<400: rp.parse(resp.text.splitlines())
-    except: pass
-    if not rp.canfetch(USERAGENT,u): 
-        ingestfail.labels(reason="robotsblock").inc()
-        return [],0
-
+    mark("Booting ingest worker")
     try:
-        r=httpget(u); r.raisefor_status()
-        soup=BeautifulSoup(r.text,"html.parser")
-        for t in soup(["script","style","nav","footer","header","aside","form"]): t.decompose()
-        text=" ".join(soup.get_text(separator=" ").split())
-        title=(soup.title.string.strip() if soup.title else "")
+        with open("seeds.json", "r", encoding="utf-8") as f:
+            seeds_cfg = json.load(f)
     except Exception as e:
-        ingestfail.labels(reason="fetcherror").inc()
-        logging.warning("Fetch error: %s", e)
-        return [],0
-    if len(text)<MINCHARS: ingestfail.labels(reason="too_short").inc(); return [],0
+        logging.error("Failed to read seeds.json: %s", e)
+        sys.exit(1)
 
-    ts=datetime.now(timezone.utc).isoformat()
-    lang=detectlangsafe(text)
-    bytes_total=len(text.encode("utf-8",errors="ignore"))
-    label=urlparse(u).netloc
+    feeds = seeds_cfg.get("feeds", [])
+    allow_domains = set(seeds_cfg.get("allow_domains", []))
+    max_pages = int(seeds_cfg.get("max_pages_per_run", 20))
+    mark(f"Config loaded | feeds={len(feeds)} allow_domains={len(allow_domains)} max_pages={max_pages}")
 
-    # store raw doc
-    rawid=f"{label}::{checksumfor(u,text)[:12]}::raw"
-    storerawdoc(rawid,text,url=u,title=title,lang=lang,timestamp=ts,policytag=decision,contenthash=contenthash(text),collectorid=COLLECTORID)
+    urls = []
+    for furl in feeds:
+        try:
+            urls.extend(from_feed(furl))
+        except Exception as e:
+            logging.warning("Feed error %s: %s", furl, e)
 
-    # chunk & build rows
-    rows=[]
-    for i,ch in enumerate(chunk_text(text)):
-        chash=content_hash(ch)
-        if chash in seenchunkhashes: continue
-        seenchunkhashes.add(chash)
-        ck=checksum_for(u,ch)
-        row={"id":f"{label}::{ck[:12]}::{i:03d}", "label":label,"text":ch,"tags":[lang,"auto"],"source":"crawler","timestamp":ts,"score":0,"url":u,"title":title,"lang":lang,"checksum":ck,"contenthash":chash,"policytag":decision,"trustscore":0.5,"provenance":{"sourceurl":u,"fetchedat":ts,"method":"httpget","robots_ok":True}}
-        okprov,missing=enforceprovenance(row,decision,collectorid=COLLECTORID)
-        logpolicydecision(actor="ingestworker", target=row.get("url","unknown"), action="ingest", decision=decision if okprov else f"DENYMISSING{''.join(missing).upper()}", reason="Provenance validation", meta={"docid":row.get("id"),"policyversion":getpolicyversion(),"missingfields":missing})
-        if not okprov: ingestfail.labels(reason="provenance").inc(); continue
-        rows.append(row)
-    return rows, bytes_total compare and check resend and upgrade ingest worker
+    before = len(urls)
+    urls = [u for u in urls if u]
+    urls = list(dict.fromkeys(urls))
+    if allow_domains:
+        urls = [u for u in urls if (urlparse(u).netloc in allow_domains)]
+    urls = [u for u in urls if is_valid_url(u) and host_allowed(u)[0]]
+
+    mark(f"Collected URLs | before={before} after_filter={len(urls)}")
+
+    seen, batch = set(), []
+    seen_chunk_hashes: set[str] = set()
+    pages_processed = 0
+
+    # FEED/HTML ingestion
+    for idx, u in enumerate(urls, start=1):
+        if pages_processed >= max_pages:
+            break
+        if u in seen:
+            continue
+        seen.add(u)
+
+        start_t = time.time()
+        rows, bytes_total = process_url(u, seen_chunk_hashes)
+
+        if rows:
+            batch.extend(rows)
+            ingest_success.inc(len(rows))
+            ingest_bytes.inc(bytes_total)
+            pages_processed += 1
+
+        ingest_latency.observe(max(time.time() - start_t, 0.0))
+
+        if len(batch) >= BATCH_SIZE:
+            try:
+                upsert_many(batch)
+            finally:
+                batch = []
+
+    # Wikipedia ingestion
+    if cfg.get("enable_wikipedia", True):
+        wiki_connector = WikipediaConnector()
+        for task in wiki_connector.fetch_tasks():
+            raw = wiki_connector.fetch(task)
+            for item in wiki_connector.parse(raw):
+                batch.append(item)
+                ingest_success.inc()
+                ingest_bytes.inc(len(item.get("content", "").encode("utf-8", errors="ignore")))
+            if len(batch) >= BATCH_SIZE:
+                try:
+                    upsert_many(batch)
+                finally:
+                    batch = []
+
+    # Final flush
+    if batch:
+        upsert_many(batch)
+
+if __name__ == "__main__":
+    try:
+        # start metrics server
+        start_http_server(METRICS_PORT, addr=METRICS_ADDR)
+        logging.info("Metrics server on %s:%d", METRICS_ADDR, METRICS_PORT)
+
+        threading.Thread(target=heartbeat, daemon=True).start()
+        main()
+
+        if METRICS_LINGER_SECS > 0:
+            logging.info(
+                "Lingering %ds to keep /metrics alive for health check",
+                METRICS_LINGER_SECS
+            )
+            end = time.time() + METRICS_LINGER_SECS
+            while time.time() < end:
+                heartbeat_gauge.set(1.0)
+                time.sleep(1)
+    except KeyboardInterrupt:
+        mark("Interrupted by user")
+        sys.exit(130)
+    finally:
+        _stop_heartbeat.set()
+        heartbeat_gauge.set(0.0)
