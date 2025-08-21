@@ -151,5 +151,9 @@
     "ang.wikipedia.org",
     "got.wikipedia.org"
   ],
-  "max_pages_per_run": 25
+  "max_pages_per_run": 25,
+  "wikipedia_pages": [
+    "Artificial_intelligence",
+    "Machine_learning"
+  ]
 }
