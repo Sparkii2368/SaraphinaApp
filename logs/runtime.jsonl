@@ -7,3 +7,4 @@
 {"level": "INFO", "name": "saraphina", "msg": "status", "time": "2025-08-23T15:02:30", "event": "status", "status": "ok"}
 {"level": "INFO", "name": "saraphina", "msg": "insights_report", "time": "2025-08-23T15:02:42", "event": "insights_report", "summary": "generated"}
 {"level": "INFO", "name": "saraphina", "msg": "audit", "time": "2025-08-23T15:02:54", "event": "audit", "average_confidence_24h": 0.92, "triggers": []}
+{"level": "INFO", "name": "saraphina", "msg": "audit", "time": "2025-08-23T16:23:44", "event": "audit", "health_score": 100.0, "mode": "normal", "confidence": 1.0, "mode_reason": "no_change", "top_anomalies": []}

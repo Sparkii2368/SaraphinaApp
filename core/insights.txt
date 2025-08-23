@@ -8,22 +8,15 @@ Enhancements:
 - Centralized thresholds
 - Safer JSON handling
 - Detect anomalies vs old baseline before updating
-- Backward-compatible module-level generate_trends_report shim
 """
 
 from __future__ import annotations
-
 import json
 import logging
 import os
+from datetime import datetime, timedelta
 from collections import Counter
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict, Literal
-
-# ---------------------------------------------------------------------------
-# Public exports
-# ---------------------------------------------------------------------------
-__all__ = ["InsightsEngine", "generate_trends_report", "Anomaly"]
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -58,13 +51,11 @@ class InsightsEngine:
     detects anomalies, persists anomaly history, and produces a trends report.
     """
 
-    def __init__(
-        self,
-        runtime_log: str = os.getenv("SARAPHINA_RUNTIME_LOG", "logs/runtime.jsonl"),
-        autobio_log: str = os.getenv("SARAPHINA_AUTOBIO_LOG", "logs/autobiography.jsonl"),
-        baselines_path: str = os.getenv("SARAPHINA_BASELINES", "logs/baselines.json"),
-        anomaly_history: str = os.getenv("SARAPHINA_ANOMALY_HISTORY", "logs/anomaly_history.jsonl"),
-    ):
+    def __init__(self,
+                 runtime_log: str = os.getenv("SARAPHINA_RUNTIME_LOG", "logs/runtime.jsonl"),
+                 autobio_log: str = os.getenv("SARAPHINA_AUTOBIO_LOG", "logs/autobiography.jsonl"),
+                 baselines_path: str = os.getenv("SARAPHINA_BASELINES", "logs/baselines.json"),
+                 anomaly_history: str = os.getenv("SARAPHINA_ANOMALY_HISTORY", "logs/anomaly_history.jsonl")):
         self.runtime_log = runtime_log
         self.autobio_log = autobio_log
         self.baselines_path = baselines_path
@@ -106,20 +97,15 @@ class InsightsEngine:
     @staticmethod
     def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
         """
-        Parse ISO-8601 into UTC-naive datetime.
-        Returns None on failure.
+        Parse ISO-8601 -> naive UTC datetime. Returns None on failure.
         """
         if not ts:
             return None
         try:
-            s = ts
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is not None:
-                # Normalize to UTC then drop tzinfo to get UTC-naive
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            return dt
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            return dt.replace(tzinfo=None)  # treat as UTC-naive
         except Exception:
             return None
 
@@ -230,11 +216,8 @@ class InsightsEngine:
                 })
 
         # 2) repeated errors
-        error_events = [
-            e for e in events
-            if (e.get("level") or "").lower() == "error"
-            or (isinstance(e.get("details"), dict) and e["details"].get("error"))
-        ]
+        error_events = [e for e in events if (e.get("level") or "").lower() == "error"
+                        or (isinstance(e.get("details"), dict) and e["details"].get("error"))]
         if error_events:
             def _msg(e: Dict[str, Any]) -> str:
                 d = e.get("details")
@@ -286,10 +269,8 @@ class InsightsEngine:
             t = e.get("time") or e.get("timestamp") or ""
             ev = e.get("event") or ""
             details = e.get("details")
-            brief = (
-                details if isinstance(details, str)
-                else (details.get("summary") if isinstance(details, dict) and "summary" in details else str(details or ""))
-            )
+            brief = (details if isinstance(details, str)
+                     else (details.get("summary") if isinstance(details, dict) and "summary" in details else str(details or "")))
             lines.append(f"{t} — {ev} {brief}".strip())
         return lines
 
@@ -299,7 +280,7 @@ class InsightsEngine:
         """
         events = self._load_jsonl(self.anomaly_history)
         cutoff = datetime.utcnow() - timedelta(hours=window_hours)
-        counts = Counter()
+        counts: Counter = Counter()
         for e in events:
             t = self._parse_timestamp(e.get("time"))
             if t and t >= cutoff:
@@ -360,29 +341,7 @@ class InsightsEngine:
         }
 
 
-# ---------------------------------------------------------------------------
-# Backward-compatible module-level API
-# ---------------------------------------------------------------------------
-def generate_trends_report(
-    runtime_log: Optional[str] = None,
-    autobio_log: Optional[str] = None,
-    baselines_path: Optional[str] = None,
-    anomaly_history: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Backward-compatible shim so callers can `from core.insights import generate_trends_report`.
-
-    Parameters are optional; if omitted, environment defaults are used.
-    """
-    engine = InsightsEngine(
-        runtime_log=runtime_log or os.getenv("SARAPHINA_RUNTIME_LOG", "logs/runtime.jsonl"),
-        autobio_log=autobio_log or os.getenv("SARAPHINA_AUTOBIO_LOG", "logs/autobiography.jsonl"),
-        baselines_path=baselines_path or os.getenv("SARAPHINA_BASELINES", "logs/baselines.json"),
-        anomaly_history=anomaly_history or os.getenv("SARAPHINA_ANOMALY_HISTORY", "logs/anomaly_history.jsonl"),
-    )
-    return engine.generate_trends_report()
-
-
 if __name__ == "__main__":
-    report = generate_trends_report()
+    engine = InsightsEngine()
+    report = engine.generate_trends_report()
     logger.info("Trends Report:\n%s", json.dumps(report, indent=2))
