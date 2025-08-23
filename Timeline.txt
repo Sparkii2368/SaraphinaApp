@@ -1,0 +1,96 @@
+Saraphina Progress Timeline
+📍 Day 0 — Inception
+Scoped Saraphina’s mission and multi‑phase roadmap.
+
+Defined governance principles and the need for provenance, trust anchors, and policy controls.
+
+🛡 Phase 0 — Identity & Trust (Complete, Ahead of Spec)
+Identity Manifest: Immutable UUID, version, origin, host/user, platform, git context.
+
+Dual Logging:
+
+runtime.jsonl for operational events
+
+autobiography.jsonl for personal “memories”
+
+CLI Tools: --smoke (heartbeat), --status (identity/memories), --doctor (diagnostics).
+
+Governance & Policy:
+
+policy.yaml v1.2 with structured allow/deny/override rules and provenance requirements.
+
+policy_loader.py + guardrails.py for enforcement with hot‑reload.
+
+Policy integrated into runner.py with logging + health checks.
+
+Provenance validation in ingestion pipeline (ingest_worker.py).
+
+Observability: Phase 0 CLI output shows who Saraphina is and her latest actions.
+
+Testing: Smoke tests confirm core flows.
+
+⚙ Above‑Baseline Extras Before Phase 1
+Governance hooks in place before any meta‑cognition work.
+
+Provenance enforcement operational.
+
+Ready hooks for streaming policy decision events into memory (planned).
+
+🚀 Phase 1 — Meta‑Cognition Kick‑off
+Objective: Move from self‑description to basic self‑assessment.
+
+New Module: core/insights.py
+
+Reads logs to summarise trends (heartbeat counts, last doctor run, recent autobiography).
+
+Flags simple anomalies (heartbeat gaps > 2 h, repeated errors).
+
+Designed for additive drop‑in — no Phase 0 breakage.
+
+CLI Enhancements:
+
+--status now includes Operational Insights.
+
+New --insights flag dumps full JSON report.
+
+New Module: core/meta_cognition.py
+
+Scores recent events for “confidence” based on type and error/retry presence.
+
+--audit flag runs a 24 h confidence analysis + anomaly check, outputs recommendations.
+
+Logging Symmetry: All new commands log to both runtime and autobiography channels.
+
+Test Loop Proven:
+
+--smoke heartbeat ✅
+
+--doctor diagnostics ✅
+
+--status now narrates trends ✅
+
+--insights dumps structured report ✅
+
+--audit shows per‑event confidence and advice ✅
+
+📅 Right Now
+Phase 0 + Phase 1 core pieces are live and functional.
+
+System has visibility into its own recent behavior and can rate itself against a baseline threshold.
+
+No self‑patch or advanced baselines yet — those are Phase 1.1 onward.
+
+🔜 Next Major Steps
+Phase 1.1:
+
+Rolling baselines (learn “normal” patterns).
+
+Persistent anomaly tracking.
+
+Auto‑queue self‑patch recommendations when thresholds trip.
+
+Phase 2: Introduce sensory inputs and secure sandboxes.
+
+Beyond: Layer ethical reasoning, swarm logic, temporal reasoning, omni‑sensory channels, and fully resilient autonomy.
+
+If you’d like, I can turn this into a single‑page wallchart — phases along the X‑axis, completed features shaded, in‑progress outlined — so you’ve got a visual status board for Saraphina at a glance. Would you like me to prep that next?

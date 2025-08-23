@@ -1,0 +1,7 @@
+{"time": "2025-08-23T12:29:29.543965+00:00", "event": "Phase\u202f0 foundation locked", "details": {"status": "ok", "notes": "Identity, logging, CLI entrypoints complete"}}
+{"time": "2025-08-23T12:36:50.155482+00:00", "event": "Status check", "details": {"status": "ok"}}
+{"time": "2025-08-23T13:02:05.966280+00:00", "event": "Heartbeat", "details": {"status": "ok", "heartbeat": true}}
+{"time": "2025-08-23T13:02:19.728396+00:00", "event": "Doctor check", "details": {"diagnostics": "all green"}}
+{"time": "2025-08-23T13:02:30.849897+00:00", "event": "Status check", "details": {"status": "ok"}}
+{"time": "2025-08-23T13:02:42.900010+00:00", "event": "Insights generated", "details": {"keys": ["heartbeat_count_24h", "last_heartbeat", "last_doctor_run", "recent_autobiography", "anomalies"]}}
+{"time": "2025-08-23T13:02:54.637348+00:00", "event": "Audit", "details": {"triggers": [], "recommendations": ["Confidence within normal range; no immediate action required"]}}

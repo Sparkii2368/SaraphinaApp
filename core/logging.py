@@ -5,7 +5,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict
 
-# --- Always anchor logs to project root ---
+# --- Always anchor logs to the project root ---
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))  # two levels up from /core
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -25,7 +25,7 @@ class JsonFormatter(logging.Formatter):
             "msg": record.getMessage(),
             "time": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
         }
-        # Unpack any structured extras
+        # Unpack any structured extras passed via `extra`
         if hasattr(record, "extra"):
             payload.update(record.extra)
         return json.dumps(payload, ensure_ascii=False)
