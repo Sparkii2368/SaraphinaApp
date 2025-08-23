@@ -9,13 +9,18 @@ Enhancements:
 - Safer JSON handling
 - Detect anomalies vs old baseline before updating
 - Backward-compatible module-level generate_trends_report shim
+- Synthetic anomaly injection + CLI utility
+- Clear synthetic anomalies utility
 """
 
 from __future__ import annotations
 
 import json
-import logging
+import importlib
+logging = importlib.import_module("logging")
+
 import os
+import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TypedDict, Literal
@@ -45,8 +50,16 @@ DOCTOR_MIN_INTERVAL_HOURS = float(os.getenv("SARAPHINA_DOCTOR_MIN_INTERVAL_HOURS
 # Types
 # ---------------------------------------------------------------------------
 class Anomaly(TypedDict):
-    type: Literal["heartbeat_gap", "repeated_error", "low_heartbeat_activity", "doctor_overdue", "unknown"]
+    type: Literal[
+        "heartbeat_gap",
+        "repeated_error",
+        "low_heartbeat_activity",
+        "doctor_overdue",
+        "system_error",
+        "unknown",
+    ]
     message: str
+    severity: Literal["info", "warning", "critical"]
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +130,6 @@ class InsightsEngine:
                 s = s[:-1] + "+00:00"
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is not None:
-                # Normalize to UTC then drop tzinfo to get UTC-naive
                 dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
             return dt
         except Exception:
@@ -211,12 +223,7 @@ class InsightsEngine:
 
     def detect_anomalies(self, events: List[Dict[str, Any]], baselines: Dict[str, Any]) -> List[Anomaly]:
         """
-        Inspect events for:
-          - heartbeat_gap (> HEARTBEAT_GAP_HOURS)
-          - repeated_error (same message > ERROR_REPEAT_THRESHOLD)
-          - low_heartbeat_activity (>= HEARTBEAT_DROP_RATIO below baseline)
-          - doctor_overdue (interval > max(MIN_INTERVAL, FACTOR * baseline))
-        Returns structured anomalies.
+        Inspect events for anomalies. Returns structured anomalies.
         """
         anomalies: List[Anomaly] = []
 
@@ -227,6 +234,7 @@ class InsightsEngine:
                 anomalies.append({
                     "type": "heartbeat_gap",
                     "message": f"Gap {curr - prev} between {prev.isoformat()} and {curr.isoformat()}",
+                    "severity": "critical",
                 })
 
         # 2) repeated errors
@@ -245,7 +253,11 @@ class InsightsEngine:
             counts = Counter(_msg(e) for e in error_events)
             for msg, count in counts.items():
                 if count > ERROR_REPEAT_THRESHOLD:
-                    anomalies.append({"type": "repeated_error", "message": f"'{msg}' seen {count} times"})
+                    anomalies.append({
+                        "type": "repeated_error",
+                        "message": f"'{msg}' seen {count} times",
+                        "severity": "warning",
+                    })
 
         # 3) low heartbeat activity vs baseline
         hb_24h = self._count_in_window(events, "heartbeat", timedelta(hours=24))
@@ -256,6 +268,7 @@ class InsightsEngine:
                 anomalies.append({
                     "type": "low_heartbeat_activity",
                     "message": f"Heartbeat 24h {hb_24h} vs baseline {hb_baseline:.2f} ({delta_ratio:.0%})",
+                    "severity": "warning",
                 })
 
         # 4) doctor overdue vs baseline
@@ -268,6 +281,7 @@ class InsightsEngine:
                     anomalies.append({
                         "type": "doctor_overdue",
                         "message": f"Doctor interval {interval_hours:.2f}h vs baseline {doc_baseline:.2f}h",
+                        "severity": "critical",
                     })
 
         return anomalies
@@ -275,10 +289,6 @@ class InsightsEngine:
     # --------------------------- Public API --------------------------------
 
     def summarize_autobiography(self, limit: int = 5) -> List[str]:
-        """
-        Return most recent 'limit' autobiography entries as lines:
-        "<time> — <event> <summary>"
-        """
         entries = self._load_jsonl(self.autobio_log)
         entries.sort(key=lambda e: self._event_time(e) or datetime.min, reverse=True)
         lines: List[str] = []
@@ -294,9 +304,6 @@ class InsightsEngine:
         return lines
 
     def get_recent_anomaly_stats(self, window_hours: int = 6) -> Dict[str, int]:
-        """
-        Count anomalies by type within the last 'window_hours'.
-        """
         events = self._load_jsonl(self.anomaly_history)
         cutoff = datetime.utcnow() - timedelta(hours=window_hours)
         counts = Counter()
@@ -307,26 +314,19 @@ class InsightsEngine:
         return dict(counts)
 
     def generate_trends_report(self) -> Dict[str, Any]:
-        """
-        Build trends report:
-          - Uses *previous* baselines to detect anomalies
-          - Persists anomalies
-          - Updates baselines with current stats
-          - Summarizes autobiography
-        """
         runtime_events = self._load_jsonl(self.runtime_log)
 
         last_heartbeat = self._last_event_time_iso(runtime_events, "heartbeat")
         last_doctor = self._last_event_time_iso(runtime_events, "doctor")
         hb_24h = self._count_in_window(runtime_events, "heartbeat", timedelta(hours=24))
 
-        # doctor interval (latest two)
+        # doctor interval
         doc_interval_hours: Optional[float] = None
         dts = self._doctor_times(runtime_events)
         if len(dts) >= 2:
             doc_interval_hours = (dts[-1] - dts[-2]).total_seconds() / 3600.0
 
-        # detect anomalies against old baselines
+        # detect anomalies
         baselines_before = self._load_baselines()
         anomalies_struct = self.detect_anomalies(runtime_events, baselines_before)
 
@@ -336,10 +336,9 @@ class InsightsEngine:
             for a in anomalies_struct:
                 self._append_jsonl(self.anomaly_history, {"time": now_iso, **a})
 
-        # update baselines with current stats
+        # update baselines
         baselines_after = self.update_baselines(hb_24h, doc_interval_hours)
 
-        # finalize
         autobio = self.summarize_autobiography(limit=5)
         recent_anomaly_stats = self.get_recent_anomaly_stats(window_hours=6)
         anomalies_text = [a["message"] for a in anomalies_struct] if anomalies_struct else ["None detected"]
@@ -359,6 +358,64 @@ class InsightsEngine:
             "recent_anomaly_counts_6h": recent_anomaly_stats,
         }
 
+    # --------------------------- Test / Dev Utilities -------------------------
+
+    def inject_synthetic_anomalies(
+        self,
+        anomalies: Optional[List[Dict[str, str]]] = None,
+        count: int = 3
+    ) -> None:
+        """
+        Append synthetic anomalies directly to anomaly_history.jsonl
+        in the correct schema (time, type, severity, message).
+        """
+        self._ensure_dir(self.anomaly_history)
+
+        now_iso = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        if anomalies is None:
+            anomalies = [
+                {
+                    "time": now_iso,
+                    "type": "system_error",
+                    "severity": "critical",
+                    "message": "Synthetic anomaly injection for Phase 1.1 validation",
+                },
+                {
+                    "time": now_iso,
+                    "type": "heartbeat_gap",
+                    "severity": "critical",
+                    "message": "Simulated missed heartbeat > 2x baseline",
+                },
+                {
+                    "time": now_iso,
+                    "type": "doctor_overdue",
+                    "severity": "critical",
+                    "message": "Forced overdue doctor run trigger",
+                },
+            ][:count]
+
+        for ev in anomalies:
+            self._append_jsonl(self.anomaly_history, ev)
+
+        logger.info("Injected %d synthetic anomalies at %s", len(anomalies), now_iso)
+
+    def clear_synthetic_anomalies(self) -> None:
+        """
+        Remove any anomalies tagged as synthetic from anomaly_history.jsonl.
+        """
+        entries = self._load_jsonl(self.anomaly_history)
+        filtered = [e for e in entries if not e.get("message", "").startswith("Synthetic anomaly injection")]
+        with open(self.anomaly_history, "w", encoding="utf-8") as f:
+            for e in filtered:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        logger.info("Cleared %d synthetic anomalies", len(entries) - len(filtered))
+
 
 # ---------------------------------------------------------------------------
 # Backward-compatible module-level API
@@ -369,11 +426,6 @@ def generate_trends_report(
     baselines_path: Optional[str] = None,
     anomaly_history: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Backward-compatible shim so callers can `from core.insights import generate_trends_report`.
-
-    Parameters are optional; if omitted, environment defaults are used.
-    """
     engine = InsightsEngine(
         runtime_log=runtime_log or os.getenv("SARAPHINA_RUNTIME_LOG", "logs/runtime.jsonl"),
         autobio_log=autobio_log or os.getenv("SARAPHINA_AUTOBIO_LOG", "logs/autobiography.jsonl"),
@@ -383,6 +435,17 @@ def generate_trends_report(
     return engine.generate_trends_report()
 
 
+# ---------------------------------------------------------------------------
+# CLI utility
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    if "--inject-anomalies" in sys.argv:
+        InsightsEngine().inject_synthetic_anomalies()
+        sys.exit(0)
+
+    if "--clear-synthetic-anomalies" in sys.argv:
+        InsightsEngine().clear_synthetic_anomalies()
+        sys.exit(0)
+
     report = generate_trends_report()
     logger.info("Trends Report:\n%s", json.dumps(report, indent=2))

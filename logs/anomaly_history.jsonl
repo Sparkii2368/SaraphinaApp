@@ -1,0 +1,10 @@
+{"type": "system_error", "severity": "critical", "message": "Synthetic anomaly injection for Phase 1.1 validation", "timestamp": "2025-08-23T16:58:46.662273+00:00"}
+{"type": "heartbeat_gap", "severity": "critical", "message": "Simulated missed heartbeat > 2x baseline", "timestamp": "2025-08-23T16:58:46.662273+00:00"}
+{"type": "doctor_overdue", "severity": "critical", "message": "Forced overdue doctor run trigger", "timestamp": "2025-08-23T16:58:46.662273+00:00"}
+{"time": "2025-08-23T17:25:56Z", "type": "system_error", "severity": "critical", "message": "Synthetic anomaly injection for Phase 1.1 validation"}
+{"time": "2025-08-23T17:25:56Z", "type": "heartbeat_gap", "severity": "critical", "message": "Simulated missed heartbeat > 2x baseline"}
+{"time": "2025-08-23T17:25:56Z", "type": "doctor_overdue", "severity": "critical", "message": "Forced overdue doctor run trigger"}
+{"time": "2025-08-23T17:56:29Z", "type": "system_error", "severity": "critical", "message": "Synthetic anomaly injection for Phase 1.1 validation"}
+{"time": "2025-08-23T17:56:29Z", "type": "heartbeat_gap", "severity": "critical", "message": "Simulated missed heartbeat > 2x baseline"}
+{"time": "2025-08-23T17:56:29Z", "type": "doctor_overdue", "severity": "critical", "message": "Forced overdue doctor run trigger"}
+{"time": "2025-08-23T18:23:15.318014", "type": "heartbeat_gap", "message": "Gap 3:20:23.561375 between 2025-08-23T15:02:05 and 2025-08-23T18:22:28.561375", "severity": "critical"}
