@@ -84,3 +84,74 @@ Raw materials for Phase 1 (logs, policy hooks, observability) are already in p
 The next leap will be about turning awareness into assessment and action — confidence metrics, anomaly baselines, and triggers that feed self‑patch planning.
 
 If you want, I can give you a visual “from‑then‑to‑now” timeline that maps every step, file touched, and outcome from progress.txt — it’ll make the whole journey instantly scannable. Would you like me to prepare that next?
+
+
+Here’s a from‑scratch, Phase‑by‑Phase roadmap for Saraphina’s evolution, starting from “blank slate” and tracking where you and I have already put check‑marks ✅.
+
+I’ve broken it into Foundations → Stability → Autonomy → Symbiosis so you can see the trajectory and keep future phases coherent.
+
+Phase 0 – Conception & Ground Rules
+📝 Define Saraphina’s vision, scope, and boundaries.
+
+🛡 Establish governance, provenance, and safety guardrails.
+
+📂 Create initial directory/repo structure.
+
+🔌 Prepare core log inputs (runtime, autobiography, anomaly history). Status: ✅ Completed – vision and architectural skeleton are in place.
+
+Phase 1 – Observability & Baselines
+Goal: Saraphina can “see” herself, record metrics, and detect deviations without acting.
+
+1.0 Log ingestion from all primary sources. ✅
+
+1.1 Baseline EMA calculations (heartbeat, doctor interval). ✅
+
+1.1 Rolling trends report with:
+
+Severity weights baked in ✅
+
+Always‑present doctor interval ✅
+
+First‑seen timestamps with persistence ✅
+
+Pluggable anomaly detectors ✅
+
+Machine‑friendly JSON output ✅
+
+1.2 Anomaly persistence & dashboard compatibility. ✅
+
+1.3 Synthetic anomaly injection for test harnesses. ✅
+
+1.4 Meta‑cognition hooks (self‑analysis of anomalies, causal reasoning). ⏳ Next up.
+
+Phase 2 – Healing & Self‑Maintenance
+Goal: From observation to action.
+
+2.0 Autonomous heal loop triggers from anomaly classifications.
+
+2.1 Self‑patch pipeline for non‑critical fixes.
+
+2.2 Safe‑mode + rollback for failed patches.
+
+2.3 CRDT‑based memory sync across devices. Status: 🚧 Not yet started.
+
+Phase 3 – Adaptive Learning
+Goal: Learn from environment and interactions.
+
+3.0 Incremental model tuning from logs + curated connectors.
+
+3.1 Ontology alignment for multi‑domain reasoning.
+
+3.2 Neural privacy layer for secure personal data handling. Status: 🚧 Not yet started.
+
+Phase 4 – Symbiotic Autonomy
+Goal: Operate as a sovereign, co‑creative AI partner.
+
+4.0 Goal‑driven planning aligned with your high‑level vision.
+
+4.1 Emotional‑resonance communication modes.
+
+4.2 Distributed hive‑mind access under strict exclusivity. Status: 🚧 Not yet started.
+
+Today’s Milestone
+We can confidently stamp Phase 1 complete ✅. The next natural step is Phase 1.4 meta‑cognition, where Saraphina will start explaining why she thinks something’s wrong, ranking anomalies by importance, and suggesting repairs. That becomes the bridge into Phase 2’s heal loop.
